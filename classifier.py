@@ -1,62 +1,92 @@
 import cv2
+import winsound
 import numpy as np
+import pandas as pd
 import tensorflow as tf
-
 from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.image import img_to_array
 
-img_width = 180
-img_height = 180
+model = load_model('IMGneT_100_7_29.h5')
+class_names = ['MBE', 'MDR-GR', 'MLN-YL', 'MTR', 'person']
 
-data_train_path = 'C:/Users/Anjil/Documents/ProductClassification/large_data_split/train'
-data_test_path = 'C:/Users/Anjil/Documents/ProductClassification/large_data_split/test'
-data_val_path = 'C:/Users/Anjil/Documents/ProductClassification/large_data_split/validation'
+roi_x, roi_y, roi_width, roi_height = 50, 50, 300, 300  # (x, y, width, height)
 
-data_train = tf.keras.utils.image_dataset_from_directory(data_train_path, shuffle=True, image_size=(img_height, img_width), batch_size=32, validation_split=False)
+csv_file = 'yogibo_product.csv'
+try:
+    df = pd.read_csv(csv_file, on_bad_lines='skip')
+except pd.errors.ParserError as e:
+    print(f"Error reading {csv_file}: {e}")
+    exit()
 
-model = load_model('C:/Users/Anjil/Documents/ProductClassification/model/modelE50.h5')
+df_filtered = df[df['pdt_pro_cd'].isin(class_names)]
+product_mapping = {row['pdt_pro_cd']: row['pdt_nm_us'] for _, row in df_filtered.iterrows()}
+class_labels = class_names
 
-def classify_image(img):
-    img = tf.image.resize(img, (img_height, img_width))
-    img_bat = tf.expand_dims(img, 0)
+def preprocess_frame(frame):
+    frame = cv2.resize(frame, (224, 224))
+    frame = img_to_array(frame) / 255.0
+    frame = np.expand_dims(frame, axis=0)
+    return frame
 
-    data_cat = data_train.class_names
+def classify_frame(frame):
+    preprocessed_frame = preprocess_frame(frame)
+    predictions = model.predict(preprocessed_frame)
+    print('predictions:', predictions)
+    predicted_class = np.argmax(predictions)
+    predicted_label = class_labels[predicted_class]
+    product_name = product_mapping.get(predicted_label, "Unknown")
+    return predicted_label, product_name
 
+def beep():
+    winsound.Beep(1000, 500)  # Beep at 1000 Hz for 500 milliseconds
+
+def is_frame_changed(fg_mask, threshold=10):
+    non_zero_count = np.count_nonzero(fg_mask)
+    return non_zero_count > threshold
+
+cap = cv2.VideoCapture(0)
+fgbg = cv2.createBackgroundSubtractorMOG2()
+
+for i in range(30):
+    ret, frame = cap.read()
+    if not ret:
+        break
+    roi = frame[roi_y:roi_y+roi_height, roi_x:roi_x+roi_width]
+    fgbg.apply(roi)
+
+print("Initialization complete !!!")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    roi = frame[roi_y:roi_y+roi_height, roi_x:roi_x+roi_width]
+    fg_mask = fgbg.apply(roi)
+    foreground_present = is_frame_changed(fg_mask)
+
+    cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_width, roi_y + roi_height), (0, 255, 0), 2)
+    cv2.imshow('Foreground Mask', fg_mask)
+    cv2.imshow('Video', frame)
     
-    # Calculate probabilities
-    predict = model.predict(img_bat)
-    score = tf.nn.softmax(predict[0])
-    class_name = data_cat[np.argmax(score)]
-    confidence = np.max(score) * 100
-    result_text = "{}: {:.2f}%".format(class_name, confidence)
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('\r'):  
+        if not foreground_present:
+            print("No item to classify")
+            cv2.putText(frame, "No item to classify", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        else:
+            class_code, product_name = classify_frame(roi)
+            if class_code == 'person':
+                print("No item to classify")
+                cv2.putText(frame, "No item to classify", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            else:
+                beep()  # Play beep sound
+                print(f"Classification result: {class_code} - {product_name}")
+                cv2.putText(frame, f"Result: {class_code} - {product_name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        # Show result for 3 seconds
+        cv2.imshow('Video', frame)
+        cv2.waitKey(3000)
+    elif key == ord('q'):
+        break
 
-    return result_text
-
-def main():
-    video_capture = cv2.VideoCapture(0)
-    if not video_capture.isOpened():
-        print("Error: Could not open video device.")
-        return
-
-    while True:
-        is_frame_captured, frame = video_capture.read()
-        if not is_frame_captured:
-            print("Error: Could not read frame.")
-            break
-
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_tensor = tf.convert_to_tensor(frame_rgb, dtype=tf.float32)
-        
-        classification_result = classify_image(frame_tensor)
-        print(classification_result)
-
-        cv2.imshow("Camera Feed", frame)
-
-        key = cv2.waitKey(1) & 0xff
-        if key == 27:  
-            break
-
-    video_capture.release()
-    cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    main()
+cap.release()
+cv2.destroyAllWindows()
